@@ -3,9 +3,8 @@
 ## Setup Virtual Environment (venv):
 
 ```
-python3 -m venv deepstream-env
-source deepstream-env/bin/activate
-
+pip3 install virtualenvwrapper
+mkvirtualenv deepstream
 ```
 
 ## Install required packages:
