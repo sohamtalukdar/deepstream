@@ -1,46 +1,87 @@
-from sklearn.preprocessing import Normalizer
-from sklearn.preprocessing import LabelEncoder
-from sklearn.neighbors import KNeighborsClassifier
-from PIL import Image
 import os
-import joblib
-import numpy as np
-# import db_query_prod as db
+import time
 import datetime
-import logging
 import json
 import uuid
-# from annoy import AnnoyIndex
-import pickle
-import time
-from data_to_db import DataToDB
-import config as cf
+import numpy as np
+import mysql.connector
+from sklearn.preprocessing import Normalizer, LabelEncoder
+from sklearn.neighbors import KNeighborsClassifier
+from PIL import Image
+import joblib
+# import config as tc  # Duplicate import
+# import db_query_prod as db  # commented out import
 
-names_dict = {}
-count = 0
+# Database configs
+DATABASE_CONFIG = {
+    'host': "localhost",
+    'user': "root",
+    'port': "3306",
+    'password': "Bharat1947",
+    'database': "face_test"
+}
+
+# Building ID 
+GATE_ID = {
+    '0': ("cam1", "192.168.177.76"),
+    '1': ("cam2", "192.168.1.12")
+}
+
+# Camera configs
+VIDEO_PATH = "file:///home/asdael/Downloads/Vishwajeet/Metro-FRS-DS-Video/new3.mp4"
+CAM1_PATH = "rtsp://ranu:Bharat1947@192.168.177.76:554/Profile2/media.smp"
+CAM_PATHS = [VIDEO_PATH, CAM1_PATH]
+print(CAM_PATHS)
+
+NAMES_DICT = {}
+COUNT = 0
 KNN_CLASSIFIER_DICT = {"trained": False, "classifier": None}
 
+
+def connect_to_db():
+    return mysql.connector.connect(
+        host=DATABASE_CONFIG['host'],
+        user=DATABASE_CONFIG['user'],
+        password=DATABASE_CONFIG['password'],
+        port=DATABASE_CONFIG['port'],
+        database=DATABASE_CONFIG['database']
+    )
+
+
+def data_to_db(predicted_name, data_to_send, timestamp):
+    db = connect_to_db()
+    cursor = db.cursor()
+
+    sql = "INSERT INTO Recog (PersonID, RecogPoint, TimeStamp) VALUES (%s, %s, %s)"
+    val = (predicted_name, data_to_send, timestamp)
+
+    cursor.execute(sql, val)
+    db.commit()
+
+    print(cursor.rowcount, "record inserted.")
+
+
 def load_dataset(dataset_path):
-	dataset_embeddings = np.load(dataset_path)
-	faces_embeddings, labels = dataset_embeddings['arr_0'], dataset_embeddings['arr_1']
-	faces_embeddings = faces_embeddings.reshape(-1,128)
-	faces_embeddings = normalize_vectors(faces_embeddings)
-	return faces_embeddings, labels
+    dataset_embeddings = np.load(dataset_path)
+    faces_embeddings, labels = dataset_embeddings['arr_0'], dataset_embeddings['arr_1']
+    faces_embeddings = faces_embeddings.reshape(-1, 128)
+    faces_embeddings = normalize_vectors(faces_embeddings)
+    return faces_embeddings, labels
+
 
 def normalize_vectors(vectors):
-	# normalize input vectors
-	normalizer = Normalizer(norm='l2')
-	vectors = normalizer.transform(vectors)
-	return vectors
+    normalizer = Normalizer(norm='l2')
+    return normalizer.transform(vectors)
+
 
 def labels_encoder(labels):
-	# label encode targets: one-hot encoding
-	# this is needed by machine learning classifiers
-	out_encoder = LabelEncoder()
-	out_encoder.fit(labels)
-	labels = out_encoder.transform(labels)
-	return out_encoder, labels
-	
+    out_encoder = LabelEncoder()
+    out_encoder.fit(labels)
+    return out_encoder, out_encoder.transform(labels)
+
+
+
+
 def predict_using_classifier(faces_embeddings, labels, face_to_predict_embedding,DataToSend):
 	x = datetime.datetime.now()
 	TimeStamp = x.strftime("%x %X")
