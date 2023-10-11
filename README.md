@@ -42,5 +42,12 @@ pip3 install pyds-1.1.8-py3-none-linux_x86_64.whl
 ## Run DeepStream Application
 
 ```shell
-deepstream-app -c deepstream_app_config.txt
+python3 deepstream.py -s file:///opt/nvidia/deepstream/deepstream/samples/streams/sample_1080p_h264.mp4 -c config_infer_primary_yoloV8_face.txt
+```
+
+Note
+
+```shell
+-s file:// or rtsp:// or http://
+--source file:// or rtsp:// or http://
 ```
