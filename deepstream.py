@@ -6,6 +6,14 @@ import gi
 import pyds
 from gi.repository import GObject, Gst, GLib
 from threading import Lock
+import platform
+gi.require_version('Gst', '1.0')
+from ctypes import *
+import ctypes
+import os
+import argparse
+import platform
+
 
 # Constants
 MAX_DISPLAY_LEN = 64
@@ -15,7 +23,6 @@ TILED_OUTPUT_WIDTH = 1920
 TILED_OUTPUT_HEIGHT = 1080
 GST_CAPS_FEATURES_NVMM = "memory:NVMM"
 TENSOR_SHAPE = 128
-CONFIG_PATH = "config_infer_primary_yoloV8.txt"  # Ensure this path is correct
 
 # PGIE Classes
 PGIE_CLASSES = {
@@ -31,6 +38,18 @@ pgie_classes_str = list(PGIE_CLASSES.keys())
 classification_results = []
 face_counter = []
 
+fps_streams = {}
+
+MAX_ELEMENTS_IN_DISPLAY_META = 16
+
+SOURCE = ''
+CONFIG_INFER = ''
+STREAMMUX_BATCH_SIZE = 1
+STREAMMUX_WIDTH = 1920
+STREAMMUX_HEIGHT = 1080
+GPU_ID = 0
+PERF_MEASUREMENT_INTERVAL_SEC = 5
+
 # OSD Settings
 OSD_PROCESS_MODE = 0
 OSD_DISPLAY_TEXT = 1
@@ -40,9 +59,6 @@ MUXER_BATCH_TIMEOUT_USEC = 4000000
 PRIMARY_DETECTOR_UID = 1
 SECONDARY_DETECTOR_UID = 2
 
-# Secondary Detector Class IDs
-SGIE_CLASS_ID_FACE = 0
-SGIE_CLASS_ID_LP = 1
 
 # TODO: Move sensitive information like RTSP sources and credentials to a configuration file or environment variables
 SOURCES = [
@@ -55,409 +71,413 @@ NUM_SOURCES = len(SOURCES)
 
 fps_mutex = Lock()
 
-
 class GETFPS:
     def __init__(self, stream_id):
         self.start_time = time.time()
         self.is_first = True
         self.frame_count = 0
         self.stream_id = stream_id
+        self.total_fps_time = 0
+        self.total_frame_count = 0
 
-    def get_fps(self):
+    def update_and_get_fps(self):
         end_time = time.time()
         if self.is_first:
             self.start_time = end_time
             self.is_first = False
-        if end_time - self.start_time > 5:
-            print("**********************FPS*****************************************")
-            print("Fps of stream", self.stream_id, "is ", float(self.frame_count) / 5.0)
-            self.frame_count = 0
+        current_time = end_time - self.start_time
+        if current_time > PERF_MEASUREMENT_INTERVAL_SEC:
+            self.total_fps_time += current_time
+            self.total_frame_count += self.frame_count
+            current_fps = float(self.frame_count) / current_time
+            avg_fps = float(self.total_frame_count) / self.total_fps_time
+            print(f'DEBUG: FPS of stream {self.stream_id + 1}: {current_fps:.2f} ({avg_fps:.2f})')
             self.start_time = end_time
+            self.frame_count = 0
         else:
             self.frame_count += 1
-
-    def print_data(self):
-        print('frame_count=', self.frame_count)
-        print('start_time=', self.start_time)
-
+        return current_fps, avg_fps
 
 class PERF_DATA:
     def __init__(self, num_streams=1):
-        self.all_stream_fps = {"stream{}".format(i): GETFPS(i) for i in range(num_streams)}
+        self.all_stream_fps = {f"stream{i}": GETFPS(i) for i in range(num_streams)}
 
     def perf_print_callback(self):
-        self.perf_dict = {idx: stream.get_fps() for idx, stream in self.all_stream_fps.items()}
+        self.perf_dict = {idx: stream.update_and_get_fps() for idx, stream in self.all_stream_fps.items()}
         print("\n**PERF:", self.perf_dict, "\n")
         return True
 
     def update_fps(self, stream_index):
-        self.all_stream_fps[stream_index].update_fps()
+        self.all_stream_fps[stream_index].update_and_get_fps()
 
-def draw_bounding_boxes(image, obj_meta, confidence):
-    confidence = '{0:.2f}'.format(confidence)
+def draw_bounding_boxes(obj_meta):
     rect_params = obj_meta.rect_params
-    top, left, width, height = int(rect_params.top), int(rect_params.left), int(rect_params.width), int(rect_params.height)
+    top = int(rect_params.top)
+    left = int(rect_params.left)
+    width = int(rect_params.width)
+    height = int(rect_params.height)
 
+    # For displaying age and gender
+    obj_name = pyds.get_string(obj_meta.text_params.display_text).split(' ')
+
+    # Drawing the bounding box rectangle (from second snippet)
+    image = cv2.rectangle(image, (left, top), (left + width, top + height), (0, 0, 255, 0), 2)
+
+    # Drawing corner lines (from the first snippet)
     color = (255, 0, 0, 0)
     w_percents = int(width * 0.05) if width > 100 else int(width * 0.1)
     h_percents = int(height * 0.05) if height > 100 else int(height * 0.1)
+    
+    # Top and bottom lines
+    image = cv2.line(image, (left + w_percents, top), (left + width - w_percents, top), color, 2)
+    image = cv2.line(image, (left + w_percents, top + height), (left + width - w_percents, top + height), color, 2)
+    
+    # Left and right lines
+    image = cv2.line(image, (left, top + h_percents), (left, top + height - h_percents), color, 2)
+    image = cv2.line(image, (left + width, top + h_percents), (left + width, top + height - h_percents), color, 2)
 
-    def draw_corner_line(image, start, end, color):
-        """Draws a line on the image from start to end with the given color."""
-        return cv2.line(image, start, end, color, 2)
-
-    # Draw top and bottom lines
-    image = draw_corner_line(image, (left + w_percents, top), (left + width - w_percents, top), color)
-    image = draw_corner_line(image, (left + w_percents, top + height), (left + width - w_percents, top + height), color)
-    # Draw left and right lines
-    image = draw_corner_line(image, (left, top + h_percents), (left, top + height - h_percents), color)
-    image = draw_corner_line(image, (left + width, top + h_percents), (left + width, top + height - h_percents), color)
+    # Displaying age and gender on the bounding box
+    image = cv2.putText(image, obj_name[1] + " " + obj_name[2], (left - 10, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255, 0), 2)
 
     return image
 
-faces_embeddings = []  # Replace with your actual embeddings list
-labels = []  # Replace with your actual labels list
+def parse_face_from_meta(frame_meta, obj_meta):
+    num_joints = int(obj_meta.mask_params.size / (sizeof(c_float) * 3))
 
-def predict_using_classifier(embeddings, labels, face_embedding, data_to_send):
-    # Placeholder function. Replace with your actual classifier's prediction method.
-    return "predicted_label", 0.95, "user_id"
+    gain = min(obj_meta.mask_params.width / STREAMMUX_WIDTH,
+               obj_meta.mask_params.height / STREAMMUX_HEIGHT)
+    pad_x = (obj_meta.mask_params.width - STREAMMUX_WIDTH * gain) / 2.0
+    pad_y = (obj_meta.mask_params.height - STREAMMUX_HEIGHT * gain) / 2.0
 
-def sgie_sink_pad_buffer_probe(pad, info, u_data):
-    
-    gst_buffer = info.get_buffer()
-    if not gst_buffer:
-        print("Unable to get GstBuffer")
-        return
+    batch_meta = frame_meta.base_meta.batch_meta
+    display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+    pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
 
-    # Extracting bounding boxes and class scores from YOLO's output
-    bounding_boxes, class_scores = extract_yolo_output(gst_buffer)
+    for i in range(num_joints):
+        data = obj_meta.mask_params.get_mask_array()
+        xc = int((data[i * 3 + 0] - pad_x) / gain)
+        yc = int((data[i * 3 + 1] - pad_y) / gain)
+        confidence = data[i * 3 + 2]
 
-    # Process the bounding boxes and class scores as required
-    # This could involve drawing the bounding boxes, filtering based on confidence thresholds, etc.
+        if confidence < 0.5:
+            continue
 
-    for box, score in zip(bounding_boxes, class_scores):
-        # Example: Drawing the bounding box
-        draw_bounding_boxes(image, box, score)
-        
-    return Gst.PadProbeReturn.OK
+        if display_meta.num_circles == MAX_ELEMENTS_IN_DISPLAY_META:
+            display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
+            pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
 
-def extract_yolo_output(buffer):
-    # Placeholder function to demonstrate extracting bounding boxes and class scores from YOLO's output
-    # The exact extraction process will depend on the YOLO output format
+        circle_params = display_meta.circle_params[display_meta.num_circles]
+        circle_params.xc = xc
+        circle_params.yc = yc
+        circle_params.radius = 6
+        circle_params.circle_color.red = 1.0
+        circle_params.circle_color.green = 1.0
+        circle_params.circle_color.blue = 1.0
+        circle_params.circle_color.alpha = 1.0
+        circle_params.has_bg_color = 1
+        circle_params.bg_color.red = 0.0
+        circle_params.bg_color.green = 0.0
+        circle_params.bg_color.blue = 1.0
+        circle_params.bg_color.alpha = 1.0
+        display_meta.num_circles += 1
 
-    bounding_boxes = []
-    class_scores = []
+def tracker_src_pad_buffer_probe(pad, info, user_data):
+    buf = info.get_buffer()
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buf))
 
-    # Assuming buffer contains the raw tensor output from YOLOv8
-    tensor_output = np.frombuffer(buffer, dtype=np.float32)
-
-    # Reshape the tensor_output based on YOLO's expected output shape. 
-    # This is just a placeholder and may need to be adjusted based on the specific YOLOv8 configuration.
-    tensor_output = tensor_output.reshape(-1, 85)  # Assuming 80 classes + 4 for bbox coordinates + 1 for objectness score
-
-    for item in tensor_output:
-        objectness_score = item[4]
-        class_probabilities = item[5:]
-        bbox = item[:4]
-
-        # Find the class with the highest probability
-        class_index = np.argmax(class_probabilities)
-        class_score = class_probabilities[class_index]
-
-        # Filtering based on a confidence threshold, for example 0.5
-        if objectness_score * class_score > 0.5:
-            bounding_boxes.append(bbox)
-            class_scores.append((class_index, class_score))
-
-    return bounding_boxes, class_scores
-
-
-def osd_sink_pad_buffer_probe(pad, info, u_data):
-    vehicle_count, person_count, face_count, lp_count, num_rects = 0, 0, 0, 0, 0
-
-    gst_buffer = info.get_buffer()
-    if not gst_buffer:
-        print("Unable to get GstBuffer")
-        return
-
-    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
     l_frame = batch_meta.frame_meta_list
-    while l_frame:
-        try:
-            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-            frame_number = frame_meta.frame_num
-            num_rects = frame_meta.num_obj_meta
-            l_obj = frame_meta.obj_meta_list
-            while l_obj:
-                try:
-                    obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
-                    class_str = pgie_classes_str[obj_meta.class_id]
-                    if obj_meta.unique_component_id == PRIMARY_DETECTOR_UID:
-                        if class_str in ['male_less_than_27', 'male_27_to_48', 'male_greater_than_48']:
-                            person_count += 1
-                        elif class_str in ['female_less_than_27', 'female_27_to_48', 'female_greater_than_48']:
-                            person_count += 1
-                    if obj_meta.unique_component_id == SECONDARY_DETECTOR_UID:
-                        if obj_meta.class_id == SGIE_CLASS_ID_FACE: face_count += 1
-                        if obj_meta.class_id == SGIE_CLASS_ID_LP: lp_count += 1
-                    l_obj = l_obj.next
-                except StopIteration: break
-            face_counter.append(face_count)
-            print(f"Read frame {frame_number} from {frame_meta.source_id}")
-            l_frame = l_frame.next
-        except StopIteration:
-            print("Errored at FD")
-            break
-
-    return Gst.PadProbeReturn.OK
-
-
-
-def integrated_sink_pad_buffer_probe(pad, info, u_data):
-    frame_number = 0
-    num_rects = 0
-    gst_buffer = info.get_buffer()
-
-    if not gst_buffer:
-        print("Unable to get GstBuffer ")
-        return
-
-    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
-    l_frame = batch_meta.frame_meta_list
-
     while l_frame:
         try:
             frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
         except StopIteration:
             break
 
-        frame_number = frame_meta.frame_num
+        current_index = frame_meta.source_id
+
         l_obj = frame_meta.obj_meta_list
-        num_rects = frame_meta.num_obj_meta
-
         while l_obj:
             try:
                 obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
             except StopIteration:
                 break
 
-            # Extract bounding box and save image
-            n_frame = pyds.get_nvds_buf_surface(hash(gst_buffer), frame_meta.batch_id)
-            n_frame = draw_bounding_boxes(n_frame, obj_meta, obj_meta.confidence)
-            frame_copy = np.array(n_frame, copy=True, order='C')
-            frame_copy = cv2.cvtColor(frame_copy, cv2.COLOR_RGBA2BGR)
+            parse_face_from_meta(frame_meta, obj_meta)
+            draw_bounding_boxes(obj_meta)
 
-            # Handle object metadata and analytics
-            l_user_meta = obj_meta.obj_user_meta_list
-            while l_user_meta:
-                try:
-                    user_meta = pyds.NvDsUserMeta.cast(l_user_meta.data)
-                    # Handle analytics extraction here if needed
+            try:
+                l_obj = l_obj.next
+            except StopIteration:
+                break
 
-                    l_user_meta = l_user_meta.next
-                except StopIteration:
-                    break
+        fps_streams['stream{0}'.format(current_index)].get_fps()
 
-            l_obj = l_obj.next
-
-        l_frame = l_frame.next
+        try:
+            l_frame = l_frame.next
+        except StopIteration:
+            break
 
     return Gst.PadProbeReturn.OK
 
+def cb_newpad(decodebin, decoder_src_pad,data):
+    print("In cb_newpad\n")
+    caps=decoder_src_pad.get_current_caps()
+    gststruct=caps.get_structure(0)
+    gstname=gststruct.get_name()
+    source_bin=data
+    features=caps.get_features(0)
 
-
-def cb_newpad(decodebin, decoder_src_pad, data):
-    # Log the entry to the function for debugging
-    print("In cb_newpad")
-
-    # Get the capabilities of the decoder source pad
-    caps = decoder_src_pad.get_current_caps()
-    gststruct = caps.get_structure(0)
-    gstname = gststruct.get_name()
-    features = caps.get_features(0)
-
-    # Debug prints to understand the flow and values
-    print("Pad capabilities name:", gstname)
-    print("Pad capabilities features:", features)
-
-    # Check if the pad is for video and not audio
-    if "video" in gstname:
-        # Ensure the decodebin has picked the NVIDIA decoder plugin
+    # Need to check if the pad created by the decodebin is for video and not
+    # audio.
+    print("gstname=",gstname)
+    if(gstname.find("video")!=-1):
+        # Link the decodebin pad only if decodebin has picked nvidia
+        # decoder plugin nvdec_*. We do this by checking if the pad caps contain
+        # NVMM memory features.
+        print("features=",features)
         if features.contains("memory:NVMM"):
-            # Link the decodebin pad to the source bin ghost pad
-            bin_ghost_pad = data.get_static_pad("src")
+            # Get the source bin ghost pad
+            bin_ghost_pad=source_bin.get_static_pad("src")
             if not bin_ghost_pad.set_target(decoder_src_pad):
                 sys.stderr.write("Failed to link decoder src pad to source bin ghost pad\n")
         else:
-            sys.stderr.write("Error: Decodebin did not pick the NVIDIA decoder plugin.\n")
+            sys.stderr.write(" Error: Decodebin did not pick nvidia decoder plugin.\n")
 
-
-def decodebin_child_added(child_proxy, Object, name, user_data):
+def decodebin_child_added(child_proxy,Object,name,user_data):
     print("Decodebin child added:", name, "\n")
-    if name.find("decodebin") != -1:
-        Object.connect("child-added", decodebin_child_added, user_data)
+    if(name.find("decodebin") != -1):
+        Object.connect("child-added",decodebin_child_added,user_data)
 
-
-def create_source_bin(index, uri):
+def create_source_bin(index,uri):
     print("Creating source bin")
 
     # Create a source GstBin to abstract this bin's content from the rest of the
     # pipeline
-    bin_name = "source-bin-%02d" % index
-    nbin = Gst.Bin.new(bin_name)
+    bin_name="source-bin-%02d" %index
+    print(bin_name)
+    nbin=Gst.Bin.new(bin_name)
     if not nbin:
         sys.stderr.write(" Unable to create source bin \n")
-
-    # Source element for reading from the uri.
-    # We will use decodebin and let it figure out the container format of the
-    # stream and the codec and plug the appropriate demux and decode plugins.
-    uri_decode_bin = Gst.ElementFactory.make("uridecodebin", "uri-decode-bin")
+    uri_decode_bin=Gst.ElementFactory.make("uridecodebin", "uri-decode-bin")
     if not uri_decode_bin:
         sys.stderr.write(" Unable to create uri decode bin \n")
     # We set the input uri to the source element
-    uri_decode_bin.set_property("uri", uri)
-    uri_decode_bin.set_property("download", True)
+    uri_decode_bin.set_property("uri",uri)
     # Connect to the "pad-added" signal of the decodebin which generates a
     # callback once a new pad for raw data has beed created by the decodebin
-    uri_decode_bin.connect("pad-added", cb_newpad, nbin)
-    uri_decode_bin.connect("child-added", decodebin_child_added, nbin)
+    uri_decode_bin.connect("pad-added",cb_newpad,nbin)
+    uri_decode_bin.connect("child-added",decodebin_child_added,nbin)
 
-    # We need to create a ghost pad for the source bin which will act as a proxy
-    # for the video decoder src pad. The ghost pad will not have a target right
-    # now. Once the decode bin creates the video decoder and generates the
-    # cb_newpad callback, we will set the ghost pad target to the video decoder
-    # src pad.
-    Gst.Bin.add(nbin, uri_decode_bin)
-    bin_pad = nbin.add_pad(Gst.GhostPad.new_no_target("src", Gst.PadDirection.SRC))
+    Gst.Bin.add(nbin,uri_decode_bin)
+    bin_pad=nbin.add_pad(Gst.GhostPad.new_no_target("src",Gst.PadDirection.SRC))
     if not bin_pad:
         sys.stderr.write(" Failed to add ghost pad in source bin \n")
         return None
     return nbin
 
-
-def bus_call(bus, message, loop):
+def bus_call(bus, message, user_data):
+    loop = user_data
     t = message.type
     if t == Gst.MessageType.EOS:
-        sys.stdout.write("End-of-stream\n")
+        sys.stdout.write('DEBUG: EOS\n')
         loop.quit()
-    elif t==Gst.MessageType.WARNING:
+    elif t == Gst.MessageType.WARNING:
         err, debug = message.parse_warning()
-        sys.stderr.write("Warning: %s: %s\n" % (err, debug))
+        sys.stderr.write('WARNING: %s: %s\n' % (err, debug))
     elif t == Gst.MessageType.ERROR:
         err, debug = message.parse_error()
-        sys.stderr.write("Error: %s: %s\n" % (err, debug))
+        sys.stderr.write('ERROR: %s: %s\n' % (err, debug))
         loop.quit()
     return True
 
 
+def is_aarch64():
+    return platform.uname()[4] == 'aarch64'
 
 def main(args):
-    # Initialization
+
+    # Standard GStreamer initialization
     Gst.init(None)
+
+    # Create gstreamer elements */
+    # Create Pipeline element that will form a connection of other elements
+    print("Creating Pipeline \n ")
     pipeline = Gst.Pipeline()
 
+    print("Creating streamux \n ")
+
+    # Create nvstreammux instance to form batches from one or more sources.
     streammux = Gst.ElementFactory.make("nvstreammux", "Stream-muxer")
     if not streammux:
-        sys.stderr.write("Failed to create StreamMux\n")
-        return -1
+        sys.stderr.write("Unable to create nvstreammux\n")
+        return None
     pipeline.add(streammux)
 
-    # Source Bins & Pad Linking
     for i in range(NUM_SOURCES):
-        uri_name = SOURCES[i]
-        source_bin = create_source_bin(i, uri_name)
+        print("Creating source_bin ",i," \n ")
+        uri_name=SOURCES[i]
+        if uri_name.find("rtsp://") == 0 :
+            is_live = True
+        source_bin=create_source_bin(i, uri_name)
         if not source_bin:
-            sys.stderr.write(f"Failed to create source bin for {uri_name}\n")
-            return -1
+            sys.stderr.write("Unable to create source bin \n")
         pipeline.add(source_bin)
-        padname = "sink_%u" % i
-        sinkpad = streammux.get_request_pad(padname)
+        padname="sink_%u" %i
+        sinkpad= streammux.get_request_pad(padname) 
         if not sinkpad:
-            sys.stderr.write(f"Failed to get request pad {padname} from {uri_name}\n")
-            return -1
-        srcpad = source_bin.get_static_pad("src")
+            sys.stderr.write("Unable to create sink pad bin \n")
+        srcpad=source_bin.get_static_pad("src")
+        if not srcpad:
+            sys.stderr.write("Unable to create src pad bin \n")
         srcpad.link(sinkpad)
 
-    # Queue Elements
-    queue_elements = [Gst.ElementFactory.make("queue", f"queue{i}") for i in range(1, 6)]
-    for queue in queue_elements:
-        pipeline.add(queue)
-
-    # Additional Gstreamer Elements
+    queue1=Gst.ElementFactory.make("queue","queue1")
+    queue2=Gst.ElementFactory.make("queue","queue2")
+    queue3=Gst.ElementFactory.make("queue","queue3")
+    queue4=Gst.ElementFactory.make("queue","queue4")
+    queue5=Gst.ElementFactory.make("queue","queue5")
+    queue6=Gst.ElementFactory.make("queue","queue6")
+    queue7=Gst.ElementFactory.make("queue","queue7")
+    queue8=Gst.ElementFactory.make("queue","queue8")
+    queue9=Gst.ElementFactory.make("queue","queue9")
+    queue10=Gst.ElementFactory.make("queue","queue10")
+    queue11=Gst.ElementFactory.make("queue","queue11")
+    pipeline.add(queue1)
+    pipeline.add(queue2)
+    pipeline.add(queue3)
+    pipeline.add(queue4)
+    pipeline.add(queue5)
+    pipeline.add(queue6)
+    pipeline.add(queue7)
+    pipeline.add(queue8)
+    pipeline.add(queue9)
+    pipeline.add(queue10)
+    pipeline.add(queue11)
+    
     pgie = Gst.ElementFactory.make("nvinfer", "primary-inference")
-    if not pgie:
-        sys.stderr.write("Failed to create primary-inference\n")
-        return -1
+    
+    streammux.set_property('width', 1980)
+    streammux.set_property('height', 1020)
+    streammux.set_property('batch-size', NUM_SOURCES)
+    streammux.set_property('batched-push-timeout', 400000)
+    streammux.set_property('attach-sys-ts', True)
+    streammux.set_property('compute-hw',1)
+    streammux.set_property('live-source',1)
+    
+    # tracker = Gst.ElementFactory.make("nvtracker", "tracker")
+    nvanalytics = Gst.ElementFactory.make("nvdsanalytics", "analytics")
+    nvanalytics.set_property("config-file", "deepstream_app_config.txt")
+    
+    nvconv1 = Gst.ElementFactory.make("nvvideoconvert", "convertor1")
+    caps1 = Gst.Caps.from_string("video/x-raw(memory:NVMM), format=RGBA")
+    filter1 = Gst.ElementFactory.make("capsfilter", "filter1")
+    filter1.set_property("caps", caps1)
+
+    tiler=Gst.ElementFactory.make("nvmultistreamtiler", "nvtiler")
+    nvosd = Gst.ElementFactory.make("nvdsosd", "onscreendisplay")
+
+    sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
+    sink.set_property('sync',0)
+    sink.set_property('qos',0)
+        
     pgie.set_property('config-file-path', "config_infer_primary_yoloV8.txt")
 
-    face_detector = Gst.ElementFactory.make("nvinfer", "face-detector")
-    if not face_detector:
-        sys.stderr.write("Failed to create face-detector\n")
-        return -1
+    tiler.set_property("width", TILED_OUTPUT_WIDTH)
+    tiler.set_property("height", TILED_OUTPUT_HEIGHT)
+    if not is_aarch64():
+        # Use CUDA unified memory in the pipeline so frames
+        # can be easily accessed on CPU in Python.
+        mem_type = int(pyds.NVBUF_MEM_CUDA_UNIFIED)
+        streammux.set_property("nvbuf-memory-type", mem_type)
+        nvconv1.set_property("nvbuf-memory-type", mem_type)
+        tiler.set_property("nvbuf-memory-type", mem_type)
 
-    face_classifier = Gst.ElementFactory.make("nvinfer", "face-classifier")
-    if not face_classifier:
-        sys.stderr.write("Failed to create face-classifier\n")
-        return -1
+    print("Adding elements to Pipeline \n")
+    pipeline.add(pgie)
+    pipeline.add(nvconv1)
+    pipeline.add(filter1)
+    # pipeline.add(tracker)
+    pipeline.add(nvanalytics)
+    pipeline.add(tiler)
+    # pipeline.add(nvvidconv)
+    pipeline.add(nvosd)
+    pipeline.add(sink)
 
-    nvanalytics = Gst.ElementFactory.make("nvdsanalytics", "analytics")
-    if not nvanalytics:
-        sys.stderr.write("Failed to create analytics\n")
-        return -1
-    pipeline.add(pgie, face_detector, face_classifier, nvanalytics)
+    streammux.link(queue1)
+    queue1.link(pgie)
+    pgie.link(queue2)
+    queue2.link(nvconv1)
+    nvconv1.link(filter1)
+    filter1.link(queue3)
+    queue3.link(nvanalytics)
+    nvanalytics.link(queue4)
+    queue4.link(tiler)
+    tiler.link(queue5)
+    queue5.link(nvosd)
+    nvosd.link(sink)
 
-    # Pipeline Construction
-    streammux.link(queue_elements[0])
-    queue_elements[0].link(face_detector)
-    face_detector.link(queue_elements[1])
-    queue_elements[1].link(face_classifier)
-    face_classifier.link(queue_elements[2])
-    queue_elements[2].link(nvanalytics)
-    
-    # Example continuation for linking pipeline elements
-    another_element = Gst.ElementFactory.make("some_element", "element_name")
-    pipeline.add(another_element)
-    queue_elements[3].link(another_element)
+    # We link elements in the following order:
+    # sourcebin -> streammux -> nvinfer -> nvtracker -> nvdsanalytics ->
+    # nvtiler -> nvvideoconvert -> nvdsosd -> sink
+    print("Linking elements in the Pipeline \n")
 
-    yet_another_element = Gst.ElementFactory.make("another_element", "another_element_name")
-    pipeline.add(yet_another_element)
-    another_element.link(yet_another_element)
-    yet_another_element.link(queue_elements[4])
-
-    # Attach the probes to the appropriate elements
-    sgie_src_pad = face_classifier.get_static_pad("src")
-    if not sgie_src_pad:
-        sys.stderr.write("Unable to get src pad from face_classifier\n")
-    else:
-        sgie_src_pad.add_probe(Gst.PadProbeType.BUFFER, sgie_sink_pad_buffer_probe, 0)
-
-    osd_src_pad = nvanalytics.get_static_pad("src")
-    if not osd_src_pad:
-        sys.stderr.write("Unable to get src pad from nvanalytics\n")
-    else:
-        osd_src_pad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
-
-    nvanalytics_src_pad = nvanalytics.get_static_pad("src")
-    if not nvanalytics_src_pad:
-        sys.stderr.write("Unable to get src pad\n")
-        return -1
-    else:
-        nvanalytics_src_pad.add_probe(Gst.PadProbeType.BUFFER, integrated_sink_pad_buffer_probe, 0)
-
-    # Playback
-    pipeline.set_state(Gst.State.PLAYING)
+    # create an event loop and feed gstreamer bus mesages to it
     loop = GLib.MainLoop()
     bus = pipeline.get_bus()
     bus.add_signal_watch()
-    bus.connect("message", bus_call, loop)
+    bus.connect ("message", bus_call, loop)
+    nvanalytics_src_pad=nvanalytics.get_static_pad("src")
+    if not nvanalytics_src_pad:
+        sys.stderr.write(" Unable to get src pad \n")
+    else:
+        nvanalytics_src_pad.add_probe(Gst.PadProbeType.BUFFER, tracker_src_pad_buffer_probe, 0)
+        # perf callback function to print fps every 5 sec
+        # GLib.timeout_add(5000, perf_data.perf_print_callback)
 
+    # List the sources
+    print("Now playing...")
+    for i, source in enumerate(args):
+        if (i != 0):
+            print(i, ": ", source)
+
+    print("Starting pipeline \n")
+    # start play back and listed to events		
+    pipeline.set_state(Gst.State.PLAYING)
     try:
         loop.run()
-    except Exception as e:
-        print(f"Error: {e}")
+    except:
+        pass
+    # cleanup
+    print("Exiting app\n")
+    pipeline.set_state(Gst.State.NULL)       
 
-    # Cleanup
-    pipeline.set_state(Gst.State.NULL)
+def parse_args():
+    global SOURCE, CONFIG_INFER, STREAMMUX_BATCH_SIZE, STREAMMUX_WIDTH, STREAMMUX_HEIGHT, GPU_ID, \
+        PERF_MEASUREMENT_INTERVAL_SEC
+
+    parser = argparse.ArgumentParser(description='DeepStream')
+    parser.add_argument('-s', '--source', required=True, help='Source stream/file')
+    parser.add_argument('-c', '--config-infer', required=True, help='Config infer file')
+    parser.add_argument('-b', '--streammux-batch-size', type=int, default=1, help='Streammux batch-size (default: 1)')
+    parser.add_argument('-w', '--streammux-width', type=int, default=1920, help='Streammux width (default: 1920)')
+    parser.add_argument('-e', '--streammux-height', type=int, default=1080, help='Streammux height (default: 1080)')
+    parser.add_argument('-g', '--gpu-id', type=int, default=0, help='GPU id (default: 0)')
+    parser.add_argument('-f', '--fps-interval', type=int, default=5, help='FPS measurement interval (default: 5)')
+    args = parser.parse_args()
+    if args.source == '':
+        sys.stderr.write('ERROR: Source not found\n')
+        sys.exit(1)
+    if args.config_infer == '' or not os.path.isfile(args.config_infer):
+        sys.stderr.write('ERROR: Config infer not found\n')
+        sys.exit(1)
+
+    SOURCE = args.source
+    CONFIG_INFER = args.config_infer
+    STREAMMUX_BATCH_SIZE = args.streammux_batch_size
+    STREAMMUX_WIDTH = args.streammux_width
+    STREAMMUX_HEIGHT = args.streammux_height
+    GPU_ID = args.gpu_id
+    PERF_MEASUREMENT_INTERVAL_SEC = args.fps_interval 
 
 if __name__ == '__main__':
-    sys.exit(main(sys.argv))
+    parse_args()
+    sys.exit(main(sys.argv[1:]))
