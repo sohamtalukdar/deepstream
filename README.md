@@ -18,7 +18,10 @@ python3 setup.py install
 
 ```shell
 python3 export_yoloV8.py -w <your_weights> --dynamic
+python3 engine.py
 ```
+
+Note: Change the name of onnx file accordingly in engine.py
 
 ## Compile YOLO Custom Layers for DeepStream
 
