@@ -44,7 +44,7 @@ pip3 install pyds-1.1.8-py3-none-linux_x86_64.whl
 ## Run DeepStream Application
 
 ```shell
-python3 deepstream.py -s file:///opt/nvidia/deepstream/deepstream/samples/streams/sample_1080p_h264.mp4 -c config_infer_primary_yoloV8_face.txt
+python3 deepstream.py -s file:////home/soham/deepstream/classroom.mp4 -c config_infer_primary_yoloV8_face.txt
 ```
 
 Note

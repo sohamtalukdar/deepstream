@@ -3,11 +3,11 @@ import time
 import numpy as np
 import cv2
 import gi
-import pyds
+gi.require_version('Gst', '1.0') 
 from gi.repository import GObject, Gst, GLib
+import pyds
 from threading import Lock
 import platform
-gi.require_version('Gst', '1.0')
 from ctypes import *
 import ctypes
 import os
