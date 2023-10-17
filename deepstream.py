@@ -15,16 +15,21 @@ import argparse
 import platform
 
 
-# Constants
+# ----------------------------- CONSTANTS -----------------------------
+# Maximum length for display
 MAX_DISPLAY_LEN = 64
+# Dimensions for muxer output
 MUXER_OUTPUT_WIDTH = 1920
 MUXER_OUTPUT_HEIGHT = 1080
+# Dimensions for tiled output
 TILED_OUTPUT_WIDTH = 1920
 TILED_OUTPUT_HEIGHT = 1080
+# Define GST CAPS features
 GST_CAPS_FEATURES_NVMM = "memory:NVMM"
+# Define tensor shape
 TENSOR_SHAPE = 128
 
-# PGIE Classes
+# Classification classes for PGIE
 PGIE_CLASSES = {
     'male_less_than_27': 0,
     'female_less_than_27': 1,
@@ -35,43 +40,51 @@ PGIE_CLASSES = {
 }
 pgie_classes_str = list(PGIE_CLASSES.keys())
 
+# Initialize lists to store classification results and face counter
 classification_results = []
 face_counter = []
 
+# Dictionary to store FPS streams
 fps_streams = {}
 
+# Max elements in display metadata
 MAX_ELEMENTS_IN_DISPLAY_META = 16
 
+# Source and infer config placeholders
 SOURCE = ''
 CONFIG_INFER = ''
+
+# StreamMux properties
 STREAMMUX_BATCH_SIZE = 1
 STREAMMUX_WIDTH = 1920
 STREAMMUX_HEIGHT = 1080
 GPU_ID = 0
+# Interval for performance measurement
 PERF_MEASUREMENT_INTERVAL_SEC = 5
 
-# OSD Settings
+# OSD settings
 OSD_PROCESS_MODE = 0
 OSD_DISPLAY_TEXT = 1
+# Timeout for muxer batch in micro-seconds
 MUXER_BATCH_TIMEOUT_USEC = 4000000
 
-# Detector UIDs
+# Define detector UIDs
 PRIMARY_DETECTOR_UID = 1
 SECONDARY_DETECTOR_UID = 2
-
 
 # TODO: Move sensitive information like RTSP sources and credentials to a configuration file or environment variables
 SOURCES = [
     "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT",
-    "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT",
-    "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT",
-    "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT"
+    ...
 ]
 NUM_SOURCES = len(SOURCES)
 
 fps_mutex = Lock()
 
+# ------------------------ CLASS DEFINITIONS ------------------------
+
 class GETFPS:
+    """Class to measure FPS for streams."""
     def __init__(self, stream_id):
         self.start_time = time.time()
         self.is_first = True
@@ -99,6 +112,7 @@ class GETFPS:
         return current_fps, avg_fps
 
 class PERF_DATA:
+    """Class to print performance data."""
     def __init__(self, num_streams=1):
         self.all_stream_fps = {f"stream{i}": GETFPS(i) for i in range(num_streams)}
 
@@ -110,7 +124,10 @@ class PERF_DATA:
     def update_fps(self, stream_index):
         self.all_stream_fps[stream_index].update_and_get_fps()
 
+# ------------------------ FUNCTION DEFINITIONS ------------------------        
+
 def draw_bounding_boxes(obj_meta):
+    """Draw bounding boxes around detected objects."""
     rect_params = obj_meta.rect_params
     top = int(rect_params.top)
     left = int(rect_params.left)
@@ -142,6 +159,7 @@ def draw_bounding_boxes(obj_meta):
     return image
 
 def parse_face_from_meta(frame_meta, obj_meta):
+    """Parse face metadata and draw bounding boxes."""
     num_joints = int(obj_meta.mask_params.size / (sizeof(c_float) * 3))
 
     gain = min(obj_meta.mask_params.width / STREAMMUX_WIDTH,
@@ -182,6 +200,7 @@ def parse_face_from_meta(frame_meta, obj_meta):
         display_meta.num_circles += 1
 
 def tracker_src_pad_buffer_probe(pad, info, user_data):
+    """Callback function to probe pads."""
     buf = info.get_buffer()
     batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buf))
 
@@ -219,6 +238,7 @@ def tracker_src_pad_buffer_probe(pad, info, user_data):
     return Gst.PadProbeReturn.OK
 
 def cb_newpad(decodebin, decoder_src_pad,data):
+    """Callback function for new pad creation."""
     print("In cb_newpad\n")
     caps=decoder_src_pad.get_current_caps()
     gststruct=caps.get_structure(0)
@@ -243,11 +263,13 @@ def cb_newpad(decodebin, decoder_src_pad,data):
             sys.stderr.write(" Error: Decodebin did not pick nvidia decoder plugin.\n")
 
 def decodebin_child_added(child_proxy,Object,name,user_data):
+    """Callback function when child is added to decodebin."""
     print("Decodebin child added:", name, "\n")
     if(name.find("decodebin") != -1):
         Object.connect("child-added",decodebin_child_added,user_data)
 
 def create_source_bin(index,uri):
+    """Function to create a bin for the source."""
     print("Creating source bin")
 
     # Create a source GstBin to abstract this bin's content from the rest of the
@@ -275,6 +297,7 @@ def create_source_bin(index,uri):
     return nbin
 
 def bus_call(bus, message, user_data):
+    """Callback for GStreamer bus messages."""
     loop = user_data
     t = message.type
     if t == Gst.MessageType.EOS:
@@ -291,10 +314,11 @@ def bus_call(bus, message, user_data):
 
 
 def is_aarch64():
+    """Check if the platform is aarch64."""
     return platform.uname()[4] == 'aarch64'
 
 def main(args):
-
+    """Main function to set up and run the GStreamer pipeline."""
     # Standard GStreamer initialization
     Gst.init(None)
 
@@ -451,6 +475,7 @@ def main(args):
     pipeline.set_state(Gst.State.NULL)       
 
 def parse_args():
+    """Parse command line arguments."""
     global SOURCE, CONFIG_INFER, STREAMMUX_BATCH_SIZE, STREAMMUX_WIDTH, STREAMMUX_HEIGHT, GPU_ID, \
         PERF_MEASUREMENT_INTERVAL_SEC
 
