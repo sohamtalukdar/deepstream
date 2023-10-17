@@ -94,7 +94,7 @@ class GETFPS:
 
     def update_and_get_fps(self):
         current_fps = 0.0
-        avg_fps = 0.0
+        avg_fps = 0.0   
 
         end_time = time.time()
         if self.is_first:
