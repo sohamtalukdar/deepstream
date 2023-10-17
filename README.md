@@ -26,7 +26,8 @@ Note: Change the name of onnx file accordingly in engine.py
 ## Compile YOLO Custom Layers for DeepStream
 
 ```shell
-export CUDA_VER=11.6 
+## check the version of deepstream and cuda for compatibility 
+export CUDA_VER=11.8  ## for deepstream 6.2
 make -C nvdsinfer_custom_impl_Yolo
 ```
 
@@ -44,7 +45,7 @@ pip3 install pyds-1.1.8-py3-none-linux_x86_64.whl
 ## Run DeepStream Application
 
 ```shell
-python3 deepstream.py -s file:////home/soham/deepstream/classroom.mp4 -c config_infer_primary_yoloV8.txt
+python3 deepstream.py -s file:////home/soham/deepstream/video.mp4 -c config_infer_primary_yoloV8.txt
 ```
 
 Note

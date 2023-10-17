@@ -56,7 +56,7 @@ CONFIG_INFER = ''
 
 # StreamMux properties
 STREAMMUX_BATCH_SIZE = 1
-STREAMMUX_WIDTH = 1920
+STREAMMUX_WIDTH = 1984
 STREAMMUX_HEIGHT = 1080
 GPU_ID = 0
 # Interval for performance measurement
@@ -74,8 +74,7 @@ SECONDARY_DETECTOR_UID = 2
 
 # TODO: Move sensitive information like RTSP sources and credentials to a configuration file or environment variables
 SOURCES = [
-    "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT",
-    ...
+    "rtsp://ranu:Bharat1947@192.168.177.36:554",
 ]
 NUM_SOURCES = len(SOURCES)
 
@@ -94,6 +93,9 @@ class GETFPS:
         self.total_frame_count = 0
 
     def update_and_get_fps(self):
+        current_fps = 0.0
+        avg_fps = 0.0
+
         end_time = time.time()
         if self.is_first:
             self.start_time = end_time
@@ -111,6 +113,7 @@ class GETFPS:
             self.frame_count += 1
         return current_fps, avg_fps
 
+
 class PERF_DATA:
     """Class to print performance data."""
     def __init__(self, num_streams=1):
@@ -126,7 +129,7 @@ class PERF_DATA:
 
 # ------------------------ FUNCTION DEFINITIONS ------------------------        
 
-def draw_bounding_boxes(obj_meta):
+def draw_bounding_boxes(obj_meta,image):
     """Draw bounding boxes around detected objects."""
     rect_params = obj_meta.rect_params
     top = int(rect_params.top)
@@ -136,6 +139,10 @@ def draw_bounding_boxes(obj_meta):
 
     # For displaying age and gender
     obj_name = pyds.get_string(obj_meta.text_params.display_text).split(' ')
+
+    # Check if obj_name has at least three elements before accessing them
+    if len(obj_name) >= 3:
+        image = cv2.putText(image, obj_name[1] + " " + obj_name[2], (left - 10, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255, 0), 2)
 
     # Drawing the bounding box rectangle (from second snippet)
     image = cv2.rectangle(image, (left, top), (left + width, top + height), (0, 0, 255, 0), 2)
@@ -221,14 +228,21 @@ def tracker_src_pad_buffer_probe(pad, info, user_data):
                 break
 
             parse_face_from_meta(frame_meta, obj_meta)
-            draw_bounding_boxes(obj_meta)
+            dummy_image = np.zeros((1080, 1920, 3), dtype=np.uint8)  # Create a black dummy image
+            draw_bounding_boxes(obj_meta, dummy_image)
+
 
             try:
                 l_obj = l_obj.next
             except StopIteration:
                 break
 
-        fps_streams['stream{0}'.format(current_index)].get_fps()
+        stream_key = 'stream{}'.format(current_index)
+        if stream_key in fps_streams:
+            fps_streams[stream_key].update_and_get_fps()
+        else:
+            print("Warning: Stream key not found:", stream_key)
+
 
         try:
             l_frame = l_frame.next
@@ -464,6 +478,8 @@ def main(args):
             print(i, ": ", source)
 
     print("Starting pipeline \n")
+    for i in range(NUM_SOURCES):
+        fps_streams['stream{}'.format(i)] = GETFPS(i)
     # start play back and listed to events		
     pipeline.set_state(Gst.State.PLAYING)
     try:
