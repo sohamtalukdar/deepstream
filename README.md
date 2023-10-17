@@ -36,8 +36,6 @@ Note: Configuration Adjustments:
 
 Update YOLO Configuration: Modify the config_infer_primary_yolov8.txt file to reflect the correct number of classes for your YOLO model.
 
-Update DeepStream Configuration: Change the URL in deepstream_app_config to point to your data source.
-
 
 ## Run DeepStream Application
 
