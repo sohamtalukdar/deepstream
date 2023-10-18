@@ -1,222 +1,214 @@
+
+from asyncore import file_dispatcher
 import sys
-import time
-import numpy as np
-import cv2
+sys.path.append('../')
 import gi
-gi.require_version('Gst', '1.0') 
-from gi.repository import GObject, Gst, GLib
-import pyds
-from threading import Lock
-import platform
+import configparser
+gi.require_version('Gst', '1.0')
+from gi.repository import GLib, Gst
 from ctypes import *
-import ctypes
-import os
-import argparse
+import time
+import math
 import platform
+# from common.FPS import PERF_DATA
+import uuid
+import datetime
+import pyds
+import cv2
+import numpy as np
+import base64
+import threading,queue
+import os
 
 
-# Constants
-MAX_DISPLAY_LEN = 64
-MUXER_OUTPUT_WIDTH = 1920
-MUXER_OUTPUT_HEIGHT = 1080
-TILED_OUTPUT_WIDTH = 1920
-TILED_OUTPUT_HEIGHT = 1080
-GST_CAPS_FEATURES_NVMM = "memory:NVMM"
-TENSOR_SHAPE = 128
-
-# PGIE Classes
-PGIE_CLASSES = {
-    'male_less_than_27': 0,
-    'female_less_than_27': 1,
-    'male_27_to_48': 2,
-    'female_27_to_48': 3,
-    'male_greater_than_48': 4,
-    'female_greater_than_48': 5
-}
-pgie_classes_str = list(PGIE_CLASSES.keys())
-
-classification_results = []
-face_counter = []
-
-fps_streams = {}
-
-MAX_ELEMENTS_IN_DISPLAY_META = 16
-
-SOURCE = ''
-CONFIG_INFER = ''
-STREAMMUX_BATCH_SIZE = 1
-STREAMMUX_WIDTH = 1920
-STREAMMUX_HEIGHT = 1080
-GPU_ID = 0
-PERF_MEASUREMENT_INTERVAL_SEC = 5
-
-# OSD Settings
-OSD_PROCESS_MODE = 0
-OSD_DISPLAY_TEXT = 1
-MUXER_BATCH_TIMEOUT_USEC = 4000000
-
-# Detector UIDs
-PRIMARY_DETECTOR_UID = 1
-SECONDARY_DETECTOR_UID = 2
+# perf_data = None
+MAX_DISPLAY_LEN=64 
+PGIE_CLASS_ID_male_less_than_27 = 0
+PGIE_CLASS_ID_female_less_than_27 = 1
+PGIE_CLASS_ID_male_27_to_48 = 2
+PGIE_CLASS_ID_female_27_to_48 = 3
+PGIE_CLASS_ID_male_greater_than_48 =4
+PGIE_CLASS_ID_female_greater_than_48 = 5
+MUXER_OUTPUT_WIDTH=1980
+MUXER_OUTPUT_HEIGHT=1020
+MUXER_BATCH_TIMEOUT_USEC=4000000
+TILED_OUTPUT_WIDTH=1980
+TILED_OUTPUT_HEIGHT=1020
+GST_CAPS_FEATURES_NVMM="memory:NVMM"
+OSD_PROCESS_MODE= 0
+OSD_DISPLAY_TEXT= 1
+pgie_classes_str= ['male_less_than_27', 'female_less_than_27', 'male_27_to_48','female_27_to_48','male_greater_than_48', 'female_greater_than_48']
 
 
-# TODO: Move sensitive information like RTSP sources and credentials to a configuration file or environment variables
-SOURCES = [
-    "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT",
-    "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT",
-    "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT",
-    "rtsp://USERNAME:PASSWORD@IP_ADDRESS:PORT"
-]
-NUM_SOURCES = len(SOURCES)
 
-fps_mutex = Lock()
+# nvanlytics_src_pad_buffer_probe  will extract metadata received on nvtiler sink pad
+# and update params for drawing rectangle, object information etc.
+def nvanalytics_src_pad_buffer_probe(pad,info,u_data):
+    frame_number=0   
+    num_rects=0
+    gst_buffer = info.get_buffer()
+    
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+    
+    if not gst_buffer:
+        print("Unable to get GstBuffer ")
+        return
 
-class GETFPS:
-    def __init__(self, stream_id):
-        self.start_time = time.time()
-        self.is_first = True
-        self.frame_count = 0
-        self.stream_id = stream_id
-        self.total_fps_time = 0
-        self.total_frame_count = 0
+    # Retrieve batch metadata from the gst_buffer
+    # Note that pyds.gst_buffer_get_nvds_batch_meta() expects the
+    # C address of gst_buffer as input, which is obtained with hash(gst_buffer)
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+    l_frame = batch_meta.frame_meta_list
+    
 
-    def update_and_get_fps(self):
-        end_time = time.time()
-        if self.is_first:
-            self.start_time = end_time
-            self.is_first = False
-        current_time = end_time - self.start_time
-        if current_time > PERF_MEASUREMENT_INTERVAL_SEC:
-            self.total_fps_time += current_time
-            self.total_frame_count += self.frame_count
-            current_fps = float(self.frame_count) / current_time
-            avg_fps = float(self.total_frame_count) / self.total_fps_time
-            print(f'DEBUG: FPS of stream {self.stream_id + 1}: {current_fps:.2f} ({avg_fps:.2f})')
-            self.start_time = end_time
-            self.frame_count = 0
-        else:
-            self.frame_count += 1
-        return current_fps, avg_fps
+    while l_frame:
+        try:
+            # Note that l_frame.data needs a cast to pyds.NvDsFrameMeta
+            # The casting is done by pyds.NvDsFrameMeta.cast()
+            # The casting also keeps ownership of the underlying memory
+            # in the C code, so the Python garbage collector will leave
+            # it alone.
+            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+        except StopIteration:
+            break
 
-class PERF_DATA:
-    def __init__(self, num_streams=1):
-        self.all_stream_fps = {f"stream{i}": GETFPS(i) for i in range(num_streams)}
+        frame_number=frame_meta.frame_num
+        l_obj=frame_meta.obj_meta_list
+        num_rects = frame_meta.num_obj_meta
+        # obj_counter = {
+        # PGIE_CLASS_ID_male_less_than_27:0,
+        # PGIE_CLASS_ID_female_less_than_27:1,
+        # PGIE_CLASS_ID_male_27_to_48:2,
+        # PGIE_CLASS_ID_female_27_to_48:3,
+        # PGIE_CLASS_ID_male_greater_than_48:4,
+        # PGIE_CLASS_ID_female_greater_than_48:5,
+    
+        
+        # }
+       
+        # print("#"*50)
+        while l_obj:
+            try: 
+                # Note that l_obj.data needs a cast to pyds.NvDsObjectMeta
+                # The casting is done by pyds.NvDsObjectMeta.cast()
+                obj_meta=pyds.NvDsObjectMeta.cast(l_obj.data)
+            except StopIteration:
+                break
+            # obj_counter[obj_meta.class_id] += 1
+            l_user_meta = obj_meta.obj_user_meta_list
+            # points = np.array(points, dtype=np.int32)
+            
+           
 
-    def perf_print_callback(self):
-        self.perf_dict = {idx: stream.update_and_get_fps() for idx, stream in self.all_stream_fps.items()}
-        print("\n**PERF:", self.perf_dict, "\n")
-        return True
+            n_frame = pyds.get_nvds_buf_surface(hash(gst_buffer), frame_meta.batch_id)
+            n_frame = draw_bounding_boxes(n_frame, obj_meta, obj_meta.confidence)
+            # n_frame = pyds.get_nvds_buf_surface()
+            frame_copy = np.array(n_frame, copy=True, order='C')
+            #print(np.shape(frame_copy))
+            frame_copy = cv2.cvtColor(frame_copy, cv2.COLOR_RGBA2BGR)
+            rect_params = obj_meta.rect_params
+            x, y, width, height = rect_params.top, rect_params.left, rect_params.width, rect_params.height   
+            x, y, width, height = int(x), int(y), int(width), int(height)
+            # x = max(0, x)
+            # y = max(0, y)
+            # width = min(width, frame_copy.shape[1] - x)
+            # height = min(height, frame_copy.shape[0] - y)  
+            cropped_image = frame_copy[x:x+height,y:y+width]  
 
-    def update_fps(self, stream_index):
-        self.all_stream_fps[stream_index].update_and_get_fps()
+            # results, boxes = CharDetection(cropped_image)
+      
+            
+            
+            img_path ="1.jpg"
+            cv2.imwrite(img_path, cropped_image)
+            SourceID = frame_meta.source_id
+            SourceID =str(SourceID)
 
-def draw_bounding_boxes(obj_meta):
+
+            
+
+            # Extract object level meta data from NvDsAnalyticsObjInfo
+            while l_user_meta:
+                try:
+                    user_meta = pyds.NvDsUserMeta.cast(l_user_meta.data)
+                    # if user_meta.base_meta.meta_type == pyds.nvds_get_user_meta_type("NVIDIA.DSANALYTICSOBJ.USER_META"):             
+                    #     user_meta_data = pyds.NvDsAnalyticsObjInfo.cast(user_meta.user_meta_data)
+                    #     if user_meta_data.dirStatus: print("Object {0} moving in direction: {1}".format(obj_meta.object_id, user_meta_data.dirStatus))                    
+                    #     if user_meta_data.lcStatus: print("Object {0} line crossing status: {1}".format(obj_meta.object_id, user_meta_data.lcStatus))
+                    #     if user_meta_data.ocStatus: print("Object {0} overcrowding status: {1}".format(obj_meta.object_id, user_meta_data.ocStatus))
+                    #     if user_meta_data.roiStatus: print("Object {0} roi status: {1}".format(obj_meta.object_id, user_meta_data.roiStatus))
+                except StopIteration:
+                    break
+
+                try:
+                    l_user_meta = l_user_meta.next
+                except StopIteration:
+                    break
+            try: 
+                l_obj=l_obj.next
+            except StopIteration:
+                break
+    
+        # Get meta data from NvDsAnalyticsFrameMeta
+        l_user = frame_meta.frame_user_meta_list
+        print("Frame Number=", frame_number, "stream id=", frame_meta.pad_index, "Number of Objects=",num_rects,)
+       
+        while l_user:
+            try:
+                user_meta = pyds.NvDsUserMeta.cast(l_user.data)
+                if user_meta.base_meta.meta_type == pyds.nvds_get_user_meta_type("NVIDIA.DSANALYTICSFRAME.USER_META"):
+                    user_meta_data = pyds.NvDsAnalyticsFrameMeta.cast(user_meta.user_meta_data)
+                    # if user_meta_data.objInROIcnt: print("Total Person in ROI: {0}".format(user_meta_data.objInROIcnt))
+                    PerconCountInROI = user_meta_data.objInROIcnt
+              
+                    if user_meta_data.ocStatus: print("Overcrowding status: {0}".format(user_meta_data.ocStatus))
+            except StopIteration:
+                break
+            try:
+                l_user = l_user.next
+            except StopIteration:
+                break
+        # Update frame rate through this probe
+        stream_index = "stream{0}".format(frame_meta.pad_index)
+        # global perf_data
+        # perf_data.update_fps(stream_index)
+        try:
+            l_frame=l_frame.next
+        except StopIteration:
+            break
+        # pritesting video/6.mp4nt("#"*50)
+
+    return Gst.PadProbeReturn.OK
+
+def draw_bounding_boxes(image, obj_meta, confidence):
+    confidence = '{0:.2f}'.format(confidence)
     rect_params = obj_meta.rect_params
     top = int(rect_params.top)
     left = int(rect_params.left)
     width = int(rect_params.width)
     height = int(rect_params.height)
-
-    # For displaying age and gender
-    obj_name = pyds.get_string(obj_meta.text_params.display_text).split(' ')
-
-    # Drawing the bounding box rectangle (from second snippet)
-    image = cv2.rectangle(image, (left, top), (left + width, top + height), (0, 0, 255, 0), 2)
-
-    # Drawing corner lines (from the first snippet)
+    # obj_name = pgie_classes_str[obj_meta.class_id]
+    # image = cv2.rectangle(image, (left, top), (left + width, top + height), (0, 0, 255, 0), 2, cv2.LINE_4)
     color = (255, 0, 0, 0)
     w_percents = int(width * 0.05) if width > 100 else int(width * 0.1)
     h_percents = int(height * 0.05) if height > 100 else int(height * 0.1)
-    
-    # Top and bottom lines
-    image = cv2.line(image, (left + w_percents, top), (left + width - w_percents, top), color, 2)
-    image = cv2.line(image, (left + w_percents, top + height), (left + width - w_percents, top + height), color, 2)
-    
-    # Left and right lines
-    image = cv2.line(image, (left, top + h_percents), (left, top + height - h_percents), color, 2)
-    image = cv2.line(image, (left + width, top + h_percents), (left + width, top + height - h_percents), color, 2)
-
-    # Displaying age and gender on the bounding box
-    image = cv2.putText(image, obj_name[1] + " " + obj_name[2], (left - 10, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255, 0), 2)
-
+    linetop_c1 = (left + w_percents, top)
+    linetop_c2 = (left + width - w_percents, top)
+    image = cv2.line(image, linetop_c1, linetop_c2, color, 2)
+    linebot_c1 = (left + w_percents, top + height)
+    linebot_c2 = (left + width - w_percents, top + height)
+    image = cv2.line(image, linebot_c1, linebot_c2, color, 2)
+    lineleft_c1 = (left, top + h_percents)
+    lineleft_c2 = (left, top + height - h_percents)
+    image = cv2.line(image, lineleft_c1, lineleft_c2, color, 2)
+    lineright_c1 = (left + width, top + h_percents)
+    lineright_c2 = (left + width, top + height - h_percents)
+    image = cv2.line(image, lineright_c1, lineright_c2, color, 2)
+    # Note that on some systems cv2.putText erroneously draws horizontal lines across the image
+    # image = cv2.putText(image, obj_name, (left - 10, top - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+    #                     (255, 0, 0, 0), 1)
     return image
-
-def parse_face_from_meta(frame_meta, obj_meta):
-    num_joints = int(obj_meta.mask_params.size / (sizeof(c_float) * 3))
-
-    gain = min(obj_meta.mask_params.width / STREAMMUX_WIDTH,
-               obj_meta.mask_params.height / STREAMMUX_HEIGHT)
-    pad_x = (obj_meta.mask_params.width - STREAMMUX_WIDTH * gain) / 2.0
-    pad_y = (obj_meta.mask_params.height - STREAMMUX_HEIGHT * gain) / 2.0
-
-    batch_meta = frame_meta.base_meta.batch_meta
-    display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
-    pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
-
-    for i in range(num_joints):
-        data = obj_meta.mask_params.get_mask_array()
-        xc = int((data[i * 3 + 0] - pad_x) / gain)
-        yc = int((data[i * 3 + 1] - pad_y) / gain)
-        confidence = data[i * 3 + 2]
-
-        if confidence < 0.5:
-            continue
-
-        if display_meta.num_circles == MAX_ELEMENTS_IN_DISPLAY_META:
-            display_meta = pyds.nvds_acquire_display_meta_from_pool(batch_meta)
-            pyds.nvds_add_display_meta_to_frame(frame_meta, display_meta)
-
-        circle_params = display_meta.circle_params[display_meta.num_circles]
-        circle_params.xc = xc
-        circle_params.yc = yc
-        circle_params.radius = 6
-        circle_params.circle_color.red = 1.0
-        circle_params.circle_color.green = 1.0
-        circle_params.circle_color.blue = 1.0
-        circle_params.circle_color.alpha = 1.0
-        circle_params.has_bg_color = 1
-        circle_params.bg_color.red = 0.0
-        circle_params.bg_color.green = 0.0
-        circle_params.bg_color.blue = 1.0
-        circle_params.bg_color.alpha = 1.0
-        display_meta.num_circles += 1
-
-def tracker_src_pad_buffer_probe(pad, info, user_data):
-    buf = info.get_buffer()
-    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(buf))
-
-    l_frame = batch_meta.frame_meta_list
-    while l_frame:
-        try:
-            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
-        except StopIteration:
-            break
-
-        current_index = frame_meta.source_id
-
-        l_obj = frame_meta.obj_meta_list
-        while l_obj:
-            try:
-                obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
-            except StopIteration:
-                break
-
-            parse_face_from_meta(frame_meta, obj_meta)
-            draw_bounding_boxes(obj_meta)
-
-            try:
-                l_obj = l_obj.next
-            except StopIteration:
-                break
-
-        fps_streams['stream{0}'.format(current_index)].get_fps()
-
-        try:
-            l_frame = l_frame.next
-        except StopIteration:
-            break
-
-    return Gst.PadProbeReturn.OK
 
 def cb_newpad(decodebin, decoder_src_pad,data):
     print("In cb_newpad\n")
@@ -257,6 +249,10 @@ def create_source_bin(index,uri):
     nbin=Gst.Bin.new(bin_name)
     if not nbin:
         sys.stderr.write(" Unable to create source bin \n")
+
+    # Source element for reading from the uri.
+    # We will use decodebin and let it figure out the container format of the
+    # stream and the codec and plug the appropriate demux and decode plugins.
     uri_decode_bin=Gst.ElementFactory.make("uridecodebin", "uri-decode-bin")
     if not uri_decode_bin:
         sys.stderr.write(" Unable to create uri decode bin \n")
@@ -267,6 +263,11 @@ def create_source_bin(index,uri):
     uri_decode_bin.connect("pad-added",cb_newpad,nbin)
     uri_decode_bin.connect("child-added",decodebin_child_added,nbin)
 
+    # We need to create a ghost pad for the source bin which will act as a proxy
+    # for the video decoder src pad. The ghost pad will not have a target right
+    # now. Once the decode bin creates the video decoder and generates the
+    # cb_newpad callback, we will set the ghost pad target to the video decoder
+    # src pad.
     Gst.Bin.add(nbin,uri_decode_bin)
     bin_pad=nbin.add_pad(Gst.GhostPad.new_no_target("src",Gst.PadDirection.SRC))
     if not bin_pad:
@@ -274,26 +275,67 @@ def create_source_bin(index,uri):
         return None
     return nbin
 
-def bus_call(bus, message, user_data):
-    loop = user_data
+def bus_call(bus, message, loop):
     t = message.type
     if t == Gst.MessageType.EOS:
-        sys.stdout.write('DEBUG: EOS\n')
+        sys.stdout.write("End-of-stream\n")
         loop.quit()
-    elif t == Gst.MessageType.WARNING:
+    elif t==Gst.MessageType.WARNING:
         err, debug = message.parse_warning()
-        sys.stderr.write('WARNING: %s: %s\n' % (err, debug))
+        sys.stderr.write("Warning: %s: %s\n" % (err, debug))
     elif t == Gst.MessageType.ERROR:
         err, debug = message.parse_error()
-        sys.stderr.write('ERROR: %s: %s\n' % (err, debug))
+        sys.stderr.write("Error: %s: %s\n" % (err, debug))
         loop.quit()
     return True
-
 
 def is_aarch64():
     return platform.uname()[4] == 'aarch64'
 
+sys.path.append('/opt/nvidia/deepstream/deepstream/lib')
+
 def main(args):
+    # filename = os.path.basename(__file__)
+    # print(filename[:-3])
+    # config = configparser.ConfigParser()
+
+    # config.read('config.ini')
+
+    # variables = config.items(str(filename[:-3]))
+
+    # cam_dict = {}
+
+    # for variable in variables:
+    #     cam_dict[variable[0]] = variable[1]
+
+    # values = list(cam_dict.values())
+    # num_cams = len(values)
+
+    # if num_cams == 1:
+    #     cam1 = values[0]
+    #     sources = [cam1]
+    # elif num_cams == 2:
+    #     cam1, cam2 = values
+    #     sources = [cam1,cam2]
+    # elif num_cams == 3:
+    #     cam1, cam2, cam3 = values
+    #     sources = [cam1,cam2,cam3]
+    # elif num_cams ==4:
+    #     cam1,cam2,cam3,cam4 = values
+    #     sources = [cam1,cam2,cam3,cam4]
+
+
+    # sources = ["file:///home/dev1/Projects/mall_age_gender/testing_video/6.mp4"]
+    sources = [
+        "rtsp://ranu:Bharat1947@192.168.177.36:554",
+        "rtsp://ranu:Bharat1947@192.168.177.36:554",
+        "rtsp://ranu:Bharat1947@192.168.177.36:554",
+        "rtsp://ranu:Bharat1947@192.168.177.36:554",
+        ]
+    number_sources = len(sources)
+    # global perf_data
+    # perf_data = PERF_DATA(len(args) - 1)
+    # number_sources=len(args)-1
 
     # Standard GStreamer initialization
     Gst.init(None)
@@ -302,19 +344,17 @@ def main(args):
     # Create Pipeline element that will form a connection of other elements
     print("Creating Pipeline \n ")
     pipeline = Gst.Pipeline()
+    is_live = False
 
     print("Creating streamux \n ")
 
     # Create nvstreammux instance to form batches from one or more sources.
     streammux = Gst.ElementFactory.make("nvstreammux", "Stream-muxer")
-    if not streammux:
-        sys.stderr.write("Unable to create nvstreammux\n")
-        return None
     pipeline.add(streammux)
 
-    for i in range(NUM_SOURCES):
+    for i in range(number_sources):
         print("Creating source_bin ",i," \n ")
-        uri_name=SOURCES[i]
+        uri_name=sources[i]
         if uri_name.find("rtsp://") == 0 :
             is_live = True
         source_bin=create_source_bin(i, uri_name)
@@ -357,7 +397,7 @@ def main(args):
     
     streammux.set_property('width', 1980)
     streammux.set_property('height', 1020)
-    streammux.set_property('batch-size', NUM_SOURCES)
+    streammux.set_property('batch-size', number_sources)
     streammux.set_property('batched-push-timeout', 400000)
     streammux.set_property('attach-sys-ts', True)
     streammux.set_property('compute-hw',1)
@@ -374,13 +414,30 @@ def main(args):
 
     tiler=Gst.ElementFactory.make("nvmultistreamtiler", "nvtiler")
     nvosd = Gst.ElementFactory.make("nvdsosd", "onscreendisplay")
+    # nvosd.set_property('process-mode',OSD_PROCESS_MODE)
+    # nvosd.set_property('display-text',OSD_DISPLAY_TEXT)
 
+    # sink = Gst.ElementFactory.make("fakesink", "fakesink")
     sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
+    # sink = Gst.ElementFactory.make("filesink","filesink")
+    # sink.set_property("location","./out.mp4")
     sink.set_property('sync',0)
     sink.set_property('qos',0)
         
-    pgie.set_property('config-file-path', "config_infer_primary_yoloV8.txt")
 
+
+
+
+    pgie.set_property('config-file-path', "config_infer_primary_yoloV8.txt")
+    # pgie_batch_size=pgie.get_property("batch-size")
+    # if(pgie_batch_size != number_sources):
+    #     print("WARNING: Overriding infer-config batch-size",pgie_batch_size," with number of sources ", number_sources," \n")
+    #     pgie.set_property("batch-size",number_sources)
+
+    # tiler_rows=int(math.sqrt(number_sources))
+    # tiler_columns=int(math.ceil((1.0*number_sources)/tiler_rows))
+    # tiler.set_property("rows",tiler_rows)
+    # tiler.set_property("columns",tiler_columns)
     tiler.set_property("width", TILED_OUTPUT_WIDTH)
     tiler.set_property("height", TILED_OUTPUT_HEIGHT)
     if not is_aarch64():
@@ -390,6 +447,34 @@ def main(args):
         streammux.set_property("nvbuf-memory-type", mem_type)
         nvconv1.set_property("nvbuf-memory-type", mem_type)
         tiler.set_property("nvbuf-memory-type", mem_type)
+
+    # #Set properties of tracker
+    # config = configparser.ConfigParser()
+    # config.read('infer_tracker_config.txt')
+    # config.sections()
+
+    # for key in config['tracker']:
+    #     if key == 'tracker-width' :
+    #         tracker_width = config.getint('tracker', key)
+    #         tracker.set_property('tracker-width', tracker_width)
+    #     if key == 'tracker-height' :
+    #         tracker_height = config.getint('tracker', key)
+    #         tracker.set_property('tracker-height', tracker_height)
+    #     if key == 'gpu-id' :
+    #         tracker_gpu_id = config.getint('tracker', key)
+    #         tracker.set_property('gpu_id', tracker_gpu_id)
+    #     if key == 'll-lib-file' :
+    #         tracker_ll_lib_file = config.get('tracker', key)
+    #         tracker.set_property('ll-lib-file', tracker_ll_lib_file)
+    #     if key == 'll-config-file' :
+    #         tracker_ll_config_file = config.get('tracker', key)
+    #         tracker.set_property('ll-config-file', tracker_ll_config_file)
+    #     if key == 'enable-batch-process' :
+    #         tracker_enable_batch_process = config.getint('tracker', key)
+    #         tracker.set_property('enable_batch_process', tracker_enable_batch_process)
+    #     if key == 'enable-past-frame' :
+    #         tracker_enable_past_frame = config.getint('tracker', key)
+    #         tracker.set_property('enable_past_frame', tracker_enable_past_frame)
 
     print("Adding elements to Pipeline \n")
     pipeline.add(pgie)
@@ -402,6 +487,13 @@ def main(args):
     pipeline.add(nvosd)
     pipeline.add(sink)
 
+    # streammux.link(pgie)
+    # pgie.link(nvconv1)
+    # nvconv1.link(filter1)
+    # filter1.link(nvanalytics)
+    # nvanalytics.link(nvosd)
+    # nvosd.link(sink)
+# ## ###### #####################################################################
     streammux.link(queue1)
     queue1.link(pgie)
     pgie.link(queue2)
@@ -414,6 +506,11 @@ def main(args):
     tiler.link(queue5)
     queue5.link(nvosd)
     nvosd.link(sink)
+    queue9.link(tiler)
+    nvosd.link(sink)
+    queue10.link(tiler)
+    nvosd.link(sink)
+    queue11.link(tiler)
 
     # We link elements in the following order:
     # sourcebin -> streammux -> nvinfer -> nvtracker -> nvdsanalytics ->
@@ -429,7 +526,7 @@ def main(args):
     if not nvanalytics_src_pad:
         sys.stderr.write(" Unable to get src pad \n")
     else:
-        nvanalytics_src_pad.add_probe(Gst.PadProbeType.BUFFER, tracker_src_pad_buffer_probe, 0)
+        nvanalytics_src_pad.add_probe(Gst.PadProbeType.BUFFER, nvanalytics_src_pad_buffer_probe, 0)
         # perf callback function to print fps every 5 sec
         # GLib.timeout_add(5000, perf_data.perf_print_callback)
 
@@ -448,36 +545,7 @@ def main(args):
         pass
     # cleanup
     print("Exiting app\n")
-    pipeline.set_state(Gst.State.NULL)       
-
-def parse_args():
-    global SOURCE, CONFIG_INFER, STREAMMUX_BATCH_SIZE, STREAMMUX_WIDTH, STREAMMUX_HEIGHT, GPU_ID, \
-        PERF_MEASUREMENT_INTERVAL_SEC
-
-    parser = argparse.ArgumentParser(description='DeepStream')
-    parser.add_argument('-s', '--source', required=True, help='Source stream/file')
-    parser.add_argument('-c', '--config-infer', required=True, help='Config infer file')
-    parser.add_argument('-b', '--streammux-batch-size', type=int, default=1, help='Streammux batch-size (default: 1)')
-    parser.add_argument('-w', '--streammux-width', type=int, default=1920, help='Streammux width (default: 1920)')
-    parser.add_argument('-e', '--streammux-height', type=int, default=1080, help='Streammux height (default: 1080)')
-    parser.add_argument('-g', '--gpu-id', type=int, default=0, help='GPU id (default: 0)')
-    parser.add_argument('-f', '--fps-interval', type=int, default=5, help='FPS measurement interval (default: 5)')
-    args = parser.parse_args()
-    if args.source == '':
-        sys.stderr.write('ERROR: Source not found\n')
-        sys.exit(1)
-    if args.config_infer == '' or not os.path.isfile(args.config_infer):
-        sys.stderr.write('ERROR: Config infer not found\n')
-        sys.exit(1)
-
-    SOURCE = args.source
-    CONFIG_INFER = args.config_infer
-    STREAMMUX_BATCH_SIZE = args.streammux_batch_size
-    STREAMMUX_WIDTH = args.streammux_width
-    STREAMMUX_HEIGHT = args.streammux_height
-    GPU_ID = args.gpu_id
-    PERF_MEASUREMENT_INTERVAL_SEC = args.fps_interval 
+    pipeline.set_state(Gst.State.NULL)
 
 if __name__ == '__main__':
-    parse_args()
-    sys.exit(main(sys.argv[1:]))
+    sys.exit(main(sys.argv))
