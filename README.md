@@ -20,7 +20,7 @@ Note: Change the name of onnx file accordingly in engine.py
 ## Compile YOLO Custom Layers for DeepStream
 
 ```shell
-export CUDA_VER=11.8
+export CUDA_VER=11.8   #make sure to check the version of your cuda
 make -C nvdsinfer_custom_impl_Yolo
 ```
 
@@ -30,19 +30,4 @@ Update YOLO Configuration: Modify the config_infer_primary_yolov8.txt file to re
 
 Update DeepStream Configuration: Change the URL in deepstream_app_config to point to your data source.
 
-```shell
-
-```
-
-## Run DeepStream Application
-
-```shell
-python3 deepstream.py -s file:///home/soham/deepstream/classroom.mp4 -c config_infer_primary_yoloV8.txt
-```
-
-Note
-
-```shell
--s file:// or rtsp:// or http://
---source file:// or rtsp:// or http://
-```
+***Run the main file***
