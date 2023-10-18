@@ -1,8 +1,13 @@
+
+
+# The values in the config file are overridden by values set through GObject
+# properties.
+
 [property]
 enable=1
 #Width height used for configuration to which below configs are configured
-config-width=1920
-config-height=1080
+config-width=1280
+config-height=720
 #osd-mode 0: Dont display any lines, rois and text
 #         1: Display only lines, rois and static text i.e. labels
 #         2: Display all info from 1 plus information about counts
