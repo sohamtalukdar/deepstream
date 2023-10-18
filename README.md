@@ -1,11 +1,11 @@
 # deepstream
 
-<!-- ## Setup Virtual Environment (venv)
+## Setup Virtual Environment (venv)
 
 ```shell
 pip3 install virtualenvwrapper
 mkvirtualenv deepstream
-``` -->
+```
 
 ## Install required packages
 
@@ -44,7 +44,7 @@ pip3 install pyds-1.1.8-py3-none-linux_x86_64.whl
 ## Run DeepStream Application
 
 ```shell
-python3 deepstream.py -s file:////home/soham/deepstream/classroom.mp4 -c config_infer_primary_yoloV8.txt
+python3 deepstream.py -s file:////home/soham/deepstream/classroom.mp4 -c config_infer_primary_yoloV8_face.txt
 ```
 
 Note
