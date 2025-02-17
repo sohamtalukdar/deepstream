@@ -1,2 +1,0 @@
-malignant
-benign
