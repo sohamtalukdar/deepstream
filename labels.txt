@@ -1,0 +1,6 @@
+male_(0-26)
+female_(0-26)
+male_(27-65)
+female_(27-65)
+male_(66+)
+female_(66+)
